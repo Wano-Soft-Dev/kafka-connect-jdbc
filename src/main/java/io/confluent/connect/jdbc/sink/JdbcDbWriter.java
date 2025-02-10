@@ -32,6 +32,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -217,20 +218,22 @@ public class JdbcDbWriter {
           throws SQLException {
     final TableId tableId = destinationTable(newRecord.topic(), schemaName, catalogName);
     BufferedRecords buffer = bufferByTable.get(tableId);
-    List<String> oldPkFields = config.pkFields;
-    if (buffer == null && tableId.tableName().equals("task")) {
-      List<String> newPkFields = new ArrayList<>();
-      newPkFields.add("task_id");
-      config.pkFields = newPkFields;
-      buffer = new BufferedRecords(config, tableId, dbDialect, dbStructure, connection);
-      bufferByTable.put(tableId, buffer);
-    } else if (buffer == null) {
-      buffer = new BufferedRecords(config, tableId, dbDialect, dbStructure, connection);
+    if (buffer == null) {
+      JdbcSinkConfig tableConfig;
+
+      if (tableId.tableName().equals("task")) {
+        Map<String, String> configMap = new HashMap<>(config.originalsStrings());
+        tableConfig = new JdbcSinkConfig(configMap);
+        tableConfig.pkFields = Collections.singletonList("task_id");
+      } else {
+        tableConfig = config;
+      }
+
+      buffer = new BufferedRecords(tableConfig, tableId, dbDialect, dbStructure, connection);
       bufferByTable.put(tableId, buffer);
     }
 
     buffer.add(newRecord);
-    config.pkFields = oldPkFields;
   }
 
   private SinkRecord getNewParentRecord(SinkRecord record,
