@@ -29,15 +29,15 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.List;
-import java.util.ArrayList;
 import java.util.Set;
-import java.util.HashSet;
-import java.util.Arrays;
 
 public class JdbcDbWriter {
   private static final Logger log = LoggerFactory.getLogger(JdbcDbWriter.class);
@@ -77,38 +77,31 @@ public class JdbcDbWriter {
 
   @SuppressWarnings("checkstyle:CyclomaticComplexity")
   void write(final Collection<SinkRecord> records)
-      throws SQLException, TableAlterOrCreateException {
+          throws SQLException, TableAlterOrCreateException {
     final Connection connection = cachedConnectionProvider.getConnection();
     String schemaName = getSchemaSafe(connection).orElse(null);
     String catalogName = getCatalogSafe(connection).orElse(null);
     try {
       final Map<TableId, BufferedRecords> bufferByTable = new HashMap<>();
       for (SinkRecord record : records) {
+        Schema recordValueSchema = record.valueSchema();
         Struct recordValue = (Struct) record.value();
 
-        if (recordValue.schema().field(SYNC_ACTOR_FIELD) != null) {
-          String syncActor = String.valueOf(recordValue.get(SYNC_ACTOR_FIELD));
-          if (SYNC_ACTOR_POSTGRES.equals(syncActor)) {
-            continue;
-          }
+        if (isSkip(recordValue)) {
+          continue;
         }
 
-        if ("syain".equals(record.topic())) {
-          Field isHaveFieldsSyainBusyos = record.valueSchema().field("syain_busyos");
-          if (isHaveFieldsSyainBusyos != null) {
-            SinkRecord newRecord = getNewParentRecord(record);
-
-            addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
-
-            List<SinkRecord> listChildRecord = getChildRecord(record);
-
-            for (SinkRecord childRecord : listChildRecord) {
-              addBufferByTable(childRecord, schemaName, catalogName, bufferByTable, connection);
-            }
+        switch (record.topic()) {
+          case "syain": {
+            handleSyainTopic(record, recordValueSchema, recordValue,
+                    schemaName, catalogName, bufferByTable, connection);
+            break;
           }
-        } else {
-          SinkRecord newRecord = getNewDefaultRecord(record);
-          addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
+          default: {
+            handleDefaultTopic(record, recordValueSchema, recordValue,
+                    schemaName, catalogName, bufferByTable, connection);
+            break;
+          }
         }
       }
       for (Map.Entry<TableId, BufferedRecords> entry : bufferByTable.entrySet()) {
@@ -135,9 +128,60 @@ public class JdbcDbWriter {
     log.info("Completed write operation for {} records to the database", records.size());
   }
 
-  private void addBufferByTable(
-          SinkRecord newRecord, String schemaName, String catalogName,
-          Map<TableId, BufferedRecords> bufferByTable, Connection connection) throws SQLException {
+  private void handleDefaultTopic(SinkRecord record,
+                                  Schema recordValueSchema,
+                                  Struct recordValue,
+                                  String schemaName,
+                                  String catalogName,
+                                  Map<TableId, BufferedRecords> bufferByTable,
+                                  Connection connection)
+          throws SQLException {
+    SinkRecord newRecord = getNewDefaultRecord(record, recordValueSchema, recordValue);
+    addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
+  }
+
+  private void handleSyainTopic(SinkRecord record,
+                                Schema recordValueSchema,
+                                Struct recordValue,
+                                String schemaName,
+                                String catalogName,
+                                Map<TableId, BufferedRecords> bufferByTable,
+                                Connection connection)
+          throws SQLException {
+    String childFieldInMongo = "syain_busyos";
+    String childTableInPostgres = "syain_busyo";
+    String foreignKeyInPostgres = "syain_id";
+
+    Field isHaveChildFieldInMongo = recordValueSchema.field(childFieldInMongo);
+    if (isHaveChildFieldInMongo != null) {
+      SinkRecord newRecord = getNewParentRecord(record, recordValueSchema, recordValue,
+              childFieldInMongo);
+
+      addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
+
+      List<SinkRecord> listChildRecord = getNewChildRecord(record, recordValueSchema,
+              recordValue, childFieldInMongo, childTableInPostgres, foreignKeyInPostgres);
+
+      for (SinkRecord childRecord : listChildRecord) {
+        addBufferByTable(childRecord, schemaName, catalogName, bufferByTable, connection);
+      }
+    }
+  }
+
+  private boolean isSkip(Struct recordValue) {
+    if (recordValue.schema().field(SYNC_ACTOR_FIELD) != null) {
+      String syncActor = String.valueOf(recordValue.get(SYNC_ACTOR_FIELD));
+      return SYNC_ACTOR_POSTGRES.equals(syncActor);
+    }
+    return false;
+  }
+
+  private void addBufferByTable(SinkRecord newRecord,
+                                String schemaName,
+                                String catalogName,
+                                Map<TableId, BufferedRecords> bufferByTable,
+                                Connection connection)
+          throws SQLException {
     final TableId tableId = destinationTable(newRecord.topic(), schemaName, catalogName);
     BufferedRecords buffer = bufferByTable.get(tableId);
     if (buffer == null) {
@@ -147,102 +191,62 @@ public class JdbcDbWriter {
     buffer.add(newRecord);
   }
 
-  private SinkRecord getNewParentRecord(SinkRecord record) {
-    Schema oldValueSchema = record.valueSchema();
-    Struct oldValue = (Struct) record.value();
+  private SinkRecord getNewParentRecord(SinkRecord record,
+                                        Schema oldValueSchema,
+                                        Struct oldValue,
+                                        String childFieldInMongo) {
+    Set<String> excludedFields = new HashSet<>(
+            Arrays.asList(childFieldInMongo, FIELD_NAME_MODIFIED_TS, FIELD_NAME_INSERTED_TS));
 
     // build ValueSchema
-    SchemaBuilder schemaBuilder = SchemaBuilder.struct();
-    Set<String> excludedFields = new HashSet<>(
-            Arrays.asList("syain_busyos", FIELD_NAME_MODIFIED_TS, FIELD_NAME_INSERTED_TS));
-
-    for (Field field : oldValueSchema.fields()) {
-      if (excludedFields.contains(field.name())) {
-        continue;
-      }
-      schemaBuilder.field(field.name(), field.schema());
-    }
-    if (oldValueSchema.field(SYNC_ACTOR_FIELD) == null) {
-      schemaBuilder.field(SYNC_ACTOR_FIELD, new SchemaBuilder(Schema.Type.STRING).build());
-    }
-    Schema newValueSchema = schemaBuilder.build();
+    Schema newValueSchema = buildNewValueSchema(oldValueSchema, excludedFields);
 
     // build Value
-    Struct newValue = new Struct(newValueSchema);
-    for (Field field : oldValueSchema.fields()) {
-      if (excludedFields.contains(field.name())) {
-        continue;
-      }
+    Struct newValue = buildNewValue(newValueSchema, oldValueSchema, excludedFields, oldValue);
 
-      if (SYNC_ACTOR_FIELD.equals(field.name())) {
-        newValue.put(field.name(), SYNC_ACTOR_MONGODB);
-      } else {
-        newValue.put(field.name(), oldValue.get(field));
-      }
-    }
-
-    if (oldValueSchema.field(SYNC_ACTOR_FIELD) == null) {
-      newValue.put(SYNC_ACTOR_FIELD, SYNC_ACTOR_MONGODB);
-    }
-
-    return new SinkRecord(record.topic(), record.kafkaPartition(),
-            record.keySchema(), record.key(), newValueSchema,
-            newValue, record.kafkaOffset(), record.timestamp(),
+    return new SinkRecord(
+            record.topic(),
+            record.kafkaPartition(),
+            record.keySchema(),
+            record.key(),
+            newValueSchema,
+            newValue,
+            record.kafkaOffset(), record.timestamp(),
             record.timestampType(), record.headers());
   }
 
-  private SinkRecord getNewDefaultRecord(SinkRecord record) {
-    Schema oldValueSchema = record.valueSchema();
-    SchemaBuilder schemaBuilder = SchemaBuilder.struct();
-
+  private SinkRecord getNewDefaultRecord(SinkRecord record,
+                                         Schema oldValueSchema,
+                                         Struct oldValue) {
     Set<String> excludedFields = new HashSet<>(
             Arrays.asList(FIELD_NAME_MODIFIED_TS, FIELD_NAME_INSERTED_TS));
 
     // build ValueSchema
-    for (Field field : oldValueSchema.fields()) {
-      if (excludedFields.contains(field.name())) {
-        continue;
-      }
-      schemaBuilder.field(field.name(), field.schema());
-    }
-    if (oldValueSchema.field(SYNC_ACTOR_FIELD) == null) {
-      schemaBuilder.field(SYNC_ACTOR_FIELD, new SchemaBuilder(Schema.Type.STRING).build());
-    }
-
-    Schema newValueSchema = schemaBuilder.build();
-
-    Struct oldValue = (Struct) record.value();
-    Struct newValue = new Struct(newValueSchema);
+    Schema newValueSchema = buildNewValueSchema(oldValueSchema, excludedFields);
 
     // build Value
-    for (Field field : oldValueSchema.fields()) {
-      if (excludedFields.contains(field.name())) {
-        continue;
-      }
+    Struct newValue = buildNewValue(newValueSchema, oldValueSchema, excludedFields, oldValue);
 
-      if (SYNC_ACTOR_FIELD.equals(field.name())) {
-        newValue.put(field.name(), SYNC_ACTOR_MONGODB);
-      } else {
-        newValue.put(field.name(), oldValue.get(field));
-      }
-    }
-
-    if (oldValueSchema.field(SYNC_ACTOR_FIELD) == null) {
-      newValue.put(SYNC_ACTOR_FIELD, SYNC_ACTOR_MONGODB);
-    }
-
-    return new SinkRecord(record.topic(), record.kafkaPartition(),
-            record.keySchema(), record.key(), newValueSchema,
-            newValue, record.kafkaOffset(), record.timestamp(),
+    return new SinkRecord(
+            record.topic(),
+            record.kafkaPartition(),
+            record.keySchema(),
+            record.key(),
+            newValueSchema,
+            newValue,
+            record.kafkaOffset(), record.timestamp(),
             record.timestampType(), record.headers());
   }
 
-  private List<SinkRecord> getChildRecord(SinkRecord record) {
+  private List<SinkRecord> getNewChildRecord(SinkRecord record,
+                                             Schema oldValueSchema,
+                                             Struct oldValue,
+                                             String childFieldInMongo,
+                                             String childTableInPostgres,
+                                             String foreignKeyInPostgres) {
     List<SinkRecord> listChildRecord = new ArrayList<>();
-    Schema oldValueSchema = record.valueSchema();
-    Struct oldValue = (Struct) record.value();
 
-    Struct child1Value = ((Struct) oldValue.get("syain_busyos"));
+    Struct child1Value = ((Struct) oldValue.get(childFieldInMongo));
 
     Set<String> excludedFields = new HashSet<>(
             Arrays.asList(FIELD_NAME_MODIFIED_TS, FIELD_NAME_INSERTED_TS));
@@ -268,7 +272,7 @@ public class JdbcDbWriter {
         String fieldName = _ID_FIELD.equals(field2.name()) ? ID_FIELD : field2.name();
         child3ValueSchemaBuilder.field(fieldName, field2.schema());
       }
-      child3ValueSchemaBuilder.field("syain_id", oldValueSchema.field(ID_FIELD).schema());
+      child3ValueSchemaBuilder.field(foreignKeyInPostgres, oldValueSchema.field(ID_FIELD).schema());
       if (child2ValueSchema.field(SYNC_ACTOR_FIELD) == null) {
         child3ValueSchemaBuilder.field(
                 SYNC_ACTOR_FIELD, new SchemaBuilder(Schema.Type.STRING).build());
@@ -291,13 +295,13 @@ public class JdbcDbWriter {
           child3Value.put(fieldName, child2Value.get(field2));
         }
       }
-      child3Value.put("syain_id", oldValue.get(ID_FIELD));
+      child3Value.put(foreignKeyInPostgres, oldValue.get(ID_FIELD));
       if (child2ValueSchema.field(SYNC_ACTOR_FIELD) == null) {
         child3Value.put(SYNC_ACTOR_FIELD, SYNC_ACTOR_MONGODB);
       }
 
       SinkRecord childRecord = new SinkRecord(
-              "syain_busyo",
+              childTableInPostgres,
               record.kafkaPartition(),
               child3KeySchema,
               child3Key,
@@ -310,6 +314,44 @@ public class JdbcDbWriter {
     });
 
     return listChildRecord;
+  }
+
+  private Struct buildNewValue(Schema newValueSchema,
+                               Schema oldValueSchema,
+                               Set<String> excludedFields,
+                               Struct oldValue) {
+    Struct newValue = new Struct(newValueSchema);
+    for (Field field : oldValueSchema.fields()) {
+      if (excludedFields.contains(field.name())) {
+        continue;
+      }
+
+      if (SYNC_ACTOR_FIELD.equals(field.name())) {
+        newValue.put(field.name(), SYNC_ACTOR_MONGODB);
+      } else {
+        newValue.put(field.name(), oldValue.get(field));
+      }
+    }
+
+    if (oldValueSchema.field(SYNC_ACTOR_FIELD) == null) {
+      newValue.put(SYNC_ACTOR_FIELD, SYNC_ACTOR_MONGODB);
+    }
+    return newValue;
+  }
+
+  private Schema buildNewValueSchema(Schema oldValueSchema,
+                                     Set<String> excludedFields) {
+    SchemaBuilder schemaBuilder = SchemaBuilder.struct();
+    for (Field field : oldValueSchema.fields()) {
+      if (excludedFields.contains(field.name())) {
+        continue;
+      }
+      schemaBuilder.field(field.name(), field.schema());
+    }
+    if (oldValueSchema.field(SYNC_ACTOR_FIELD) == null) {
+      schemaBuilder.field(SYNC_ACTOR_FIELD, new SchemaBuilder(Schema.Type.STRING).build());
+    }
+    return schemaBuilder.build();
   }
 
   void closeQuietly() {
