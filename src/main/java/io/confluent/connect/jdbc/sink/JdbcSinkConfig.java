@@ -601,7 +601,7 @@ public class JdbcSinkConfig extends AbstractConfig {
   public final boolean autoEvolve;
   public final InsertMode insertMode;
   public final PrimaryKeyMode pkMode;
-  public final List<String> pkFields;
+  public List<String> pkFields;
   public final Set<String> fieldsWhitelist;
   public final String dialectName;
   public final TimeZone timeZone;
