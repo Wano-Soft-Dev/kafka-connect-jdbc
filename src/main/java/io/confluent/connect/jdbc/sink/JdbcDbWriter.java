@@ -143,6 +143,14 @@ public class JdbcDbWriter {
                     childTableInPostgres, null, null, null);
             break;
           }
+          case "class_group": {
+            String childFieldInMongo = "lower_classgroups";
+            String childTableInPostgres = "classgroup_rel";
+            handleCustomTopic(record, recordValueSchema, recordValue, schemaName,
+                    catalogName, bufferByTable, connection, childFieldInMongo,
+                    childTableInPostgres, null, null, null);
+            break;
+          }
           default: {
             handleDefaultTopic(record, recordValueSchema, recordValue,
                     schemaName, catalogName, bufferByTable, connection);
@@ -351,7 +359,6 @@ public class JdbcDbWriter {
     return parentKeySchema;
   }
 
-  @SuppressWarnings({"checkstyle:CyclomaticComplexity", "checkstyle:NPathComplexity", "JavaNCSS"})
   private List<SinkRecord> getNewChildRecord(SinkRecord record,
                                              Schema oldValueSchema,
                                              Struct oldValue,
@@ -360,15 +367,8 @@ public class JdbcDbWriter {
                                              String foreignKeyInPostgres,
                                              String primaryKeyChildTableInPostgres) {
     List<SinkRecord> listChildRecord = new ArrayList<>();
-
     Struct child1Value = ((Struct) oldValue.get(childFieldInMongo));
-
-    Set<String> excludedFields = new HashSet<>(
-            Arrays.asList(FIELD_NAME_MODIFIED_TS, FIELD_NAME_INSERTED_TS));
-
-    if ("class".equals(record.topic())) {
-      excludedFields.add("class_id");
-    }
+    Set<String> excludedFields = getExcludedFieldsChildRecord(record);
 
     child1Value.schema().schema().fields().forEach(field -> {
       Schema child2ValueSchema = field.schema();
@@ -378,108 +378,17 @@ public class JdbcDbWriter {
       Schema child3KeySchema = buildNewKeySchema(record, primaryKeyChildTableInPostgres);
 
       // build Key
-      Struct child3Key = new Struct(child3KeySchema);
-      if (primaryKeyChildTableInPostgres != null) {
-        child3Key.put(primaryKeyChildTableInPostgres,
-                child2Value.get(child2ValueSchema.field(primaryKeyChildTableInPostgres)));
-      } else {
-        child3Key.put(ID_FIELD, child2Value.get(child2ValueSchema.field(_ID_FIELD)));
-      }
+      Struct child3Key = buildKeyChildRecord(primaryKeyChildTableInPostgres,
+              child3KeySchema, child2Value, child2ValueSchema);
 
       // build ValueSchema
-      SchemaBuilder child3ValueSchemaBuilder = SchemaBuilder.struct();
-
-      // build ValueSchema 1: Bỏ qua Schema trong danh sách bỏ qua, thay thế Schema
-      for (Field field2 : child2ValueSchema.fields()) {
-        if (excludedFields.contains(field.name())) {
-          continue;
-        }
-        String fieldName = field2.name();
-        switch (fieldName) {
-          case "hiduke":
-            if ("workschedule".equals(childTableInPostgres)) {
-              child3ValueSchemaBuilder.field(fieldName, Timestamp.SCHEMA);
-            } else {
-              child3ValueSchemaBuilder.field(fieldName, field2.schema());
-            }
-            break;
-
-          case _ID_FIELD:
-            child3ValueSchemaBuilder.field(ID_FIELD, field2.schema());
-            break;
-
-          default:
-            child3ValueSchemaBuilder.field(fieldName, field2.schema());
-            break;
-        }
-      }
-
-      // build ValueSchema 2: Thêm Schema chưa có
-      if (foreignKeyInPostgres != null) {
-        child3ValueSchemaBuilder.field(foreignKeyInPostgres,
-                oldValueSchema.field(ID_FIELD).schema());
-      }
-      if (child2ValueSchema.field(SYNC_ACTOR_FIELD) == null) {
-        child3ValueSchemaBuilder.field(
-                SYNC_ACTOR_FIELD, new SchemaBuilder(Schema.Type.STRING).build());
-      }
-      if ("class".equals(record.topic())) {
-        child3ValueSchemaBuilder.field("higher", oldValueSchema.field(ID_FIELD).schema());
-        child3ValueSchemaBuilder.field("lower", child2ValueSchema.field("class_id").schema());
-        child3ValueSchemaBuilder.field("depth", SchemaBuilder.type(Schema.Type.INT64).build());
-        child3ValueSchemaBuilder.field("type", SchemaBuilder.type(Schema.Type.STRING).build());
-      }
-
-      Schema child3ValueSchema = child3ValueSchemaBuilder.build();
+      Schema child3ValueSchema = buildValueSchemaChildRecord(record, oldValueSchema,
+              childTableInPostgres, foreignKeyInPostgres, child2ValueSchema, excludedFields);
 
       // build Value
-      Struct child3Value = new Struct(child3ValueSchema);
-      // build Value 1: Bỏ qua Value trong danh sách bỏ qua, thay thế Schema
-      for (Field field2 : child2ValueSchema.fields()) {
-        if (excludedFields.contains(field.name())) {
-          continue;
-        }
-
-        String fieldName = field2.name();
-        switch (fieldName) {
-          case _ID_FIELD:
-            child3Value.put(ID_FIELD, child2Value.get(field2));
-            break;
-          case SYNC_ACTOR_FIELD:
-            child3Value.put(fieldName, SYNC_ACTOR_MONGODB);
-            break;
-          case "hiduke":
-            if ("workschedule".equals(childTableInPostgres)) {
-              int hidukeLong = ((Long) child2Value.get(field2)).intValue();
-              Calendar calendar = Calendar.getInstance();
-              calendar.set(1970, Calendar.JANUARY, 1);
-              calendar.add(Calendar.DATE, hidukeLong);
-              Date resultDate = calendar.getTime();
-
-              child3Value.put(fieldName, resultDate);
-            } else {
-              child3Value.put(fieldName, child2Value.get(field2));
-            }
-            break;
-          default:
-            child3Value.put(fieldName, child2Value.get(field2));
-            break;
-        }
-      }
-
-      // build Value 2: Thêm Value chưa có
-      if (foreignKeyInPostgres != null) {
-        child3Value.put(foreignKeyInPostgres, oldValue.get(ID_FIELD));
-      }
-      if (child2ValueSchema.field(SYNC_ACTOR_FIELD) == null) {
-        child3Value.put(SYNC_ACTOR_FIELD, SYNC_ACTOR_MONGODB);
-      }
-      if ("class".equals(record.topic())) {
-        child3Value.put("higher", oldValue.get(ID_FIELD));
-        child3Value.put("lower", child2Value.get("class_id"));
-        child3Value.put("depth", 1L);
-        child3Value.put("type", "");
-      }
+      Struct child3Value = buildValueChildRecord(record, oldValue,
+              childTableInPostgres, foreignKeyInPostgres, child3ValueSchema,
+              child2ValueSchema, excludedFields, child2Value);
 
       SinkRecord childRecord = new SinkRecord(
               childTableInPostgres,
@@ -495,6 +404,166 @@ public class JdbcDbWriter {
     });
 
     return listChildRecord;
+  }
+
+  private Struct buildKeyChildRecord(String primaryKeyChildTableInPostgres,
+                                     Schema child3KeySchema,
+                                     Struct child2Value,
+                                     Schema child2ValueSchema) {
+    Struct child3Key = new Struct(child3KeySchema);
+    if (primaryKeyChildTableInPostgres != null) {
+      child3Key.put(primaryKeyChildTableInPostgres,
+              child2Value.get(child2ValueSchema.field(primaryKeyChildTableInPostgres)));
+    } else {
+      child3Key.put(ID_FIELD, child2Value.get(child2ValueSchema.field(_ID_FIELD)));
+    }
+    return child3Key;
+  }
+
+  private Set<String> getExcludedFieldsChildRecord(SinkRecord record) {
+    Set<String> excludedFields = new HashSet<>(
+            Arrays.asList(FIELD_NAME_MODIFIED_TS, FIELD_NAME_INSERTED_TS));
+
+    switch (record.topic()) {
+      case "class":
+        excludedFields.add("class_id");
+        break;
+      case "class_group":
+        excludedFields.add("class_group_id");
+        break;
+      default:
+        break;
+    }
+    return excludedFields;
+  }
+
+  private Schema buildValueSchemaChildRecord(SinkRecord record,
+                                             Schema oldValueSchema,
+                                             String childTableInPostgres,
+                                             String foreignKeyInPostgres,
+                                             Schema child2ValueSchema,
+                                             Set<String> excludedFields) {
+    SchemaBuilder child3ValueSchemaBuilder = SchemaBuilder.struct();
+
+    // Bỏ qua Schema trong danh sách bỏ qua, thay thế Schema
+    for (Field field2 : child2ValueSchema.fields()) {
+      if (excludedFields.contains(field2.name())) {
+        continue;
+      }
+      String fieldName = field2.name();
+      switch (fieldName) {
+        case "hiduke":
+          if ("workschedule".equals(childTableInPostgres)) {
+            child3ValueSchemaBuilder.field(fieldName, Timestamp.SCHEMA);
+          } else {
+            child3ValueSchemaBuilder.field(fieldName, field2.schema());
+          }
+          break;
+
+        case _ID_FIELD:
+          child3ValueSchemaBuilder.field(ID_FIELD, field2.schema());
+          break;
+
+        default:
+          child3ValueSchemaBuilder.field(fieldName, field2.schema());
+          break;
+      }
+    }
+
+    // Thêm Schema chưa có
+    if (foreignKeyInPostgres != null) {
+      child3ValueSchemaBuilder.field(foreignKeyInPostgres,
+              oldValueSchema.field(ID_FIELD).schema());
+    }
+    if (child2ValueSchema.field(SYNC_ACTOR_FIELD) == null) {
+      child3ValueSchemaBuilder.field(
+              SYNC_ACTOR_FIELD, new SchemaBuilder(Schema.Type.STRING).build());
+    }
+    switch (record.topic()) {
+      case "class":
+        child3ValueSchemaBuilder.field("higher", oldValueSchema.field(ID_FIELD).schema());
+        child3ValueSchemaBuilder.field("lower", child2ValueSchema.field("class_id").schema());
+        child3ValueSchemaBuilder.field("depth", SchemaBuilder.type(Schema.Type.INT64).build());
+        child3ValueSchemaBuilder.field("type", SchemaBuilder.type(Schema.Type.STRING).build());
+        break;
+      case "class_group":
+        child3ValueSchemaBuilder.field("higher", oldValueSchema.field(ID_FIELD).schema());
+        child3ValueSchemaBuilder.field("lower", child2ValueSchema.field("class_group_id").schema());
+        child3ValueSchemaBuilder.field("depth", SchemaBuilder.type(Schema.Type.INT64).build());
+        break;
+      default:
+        break;
+    }
+
+    return child3ValueSchemaBuilder.build();
+  }
+
+  @SuppressWarnings("checkstyle:CyclomaticComplexity")
+  private Struct buildValueChildRecord(SinkRecord record,
+                                       Struct oldValue,
+                                       String childTableInPostgres,
+                                       String foreignKeyInPostgres,
+                                       Schema child3ValueSchema,
+                                       Schema child2ValueSchema,
+                                       Set<String> excludedFields,
+                                       Struct child2Value) {
+    Struct child3Value = new Struct(child3ValueSchema);
+    // Bỏ qua Value trong danh sách bỏ qua, thay thế Schema
+    for (Field field2 : child2ValueSchema.fields()) {
+      if (excludedFields.contains(field2.name())) {
+        continue;
+      }
+
+      String fieldName = field2.name();
+      switch (fieldName) {
+        case _ID_FIELD:
+          child3Value.put(ID_FIELD, child2Value.get(field2));
+          break;
+        case SYNC_ACTOR_FIELD:
+          child3Value.put(fieldName, SYNC_ACTOR_MONGODB);
+          break;
+        case "hiduke":
+          if ("workschedule".equals(childTableInPostgres)) {
+            int hidukeLong = ((Long) child2Value.get(field2)).intValue();
+            Calendar calendar = Calendar.getInstance();
+            calendar.set(1970, Calendar.JANUARY, 1);
+            calendar.add(Calendar.DATE, hidukeLong);
+            Date resultDate = calendar.getTime();
+
+            child3Value.put(fieldName, resultDate);
+          } else {
+            child3Value.put(fieldName, child2Value.get(field2));
+          }
+          break;
+        default:
+          child3Value.put(fieldName, child2Value.get(field2));
+          break;
+      }
+    }
+
+    // Thêm Value chưa có
+    if (foreignKeyInPostgres != null) {
+      child3Value.put(foreignKeyInPostgres, oldValue.get(ID_FIELD));
+    }
+    if (child2ValueSchema.field(SYNC_ACTOR_FIELD) == null) {
+      child3Value.put(SYNC_ACTOR_FIELD, SYNC_ACTOR_MONGODB);
+    }
+    switch (record.topic()) {
+      case "class":
+        child3Value.put("higher", oldValue.get(ID_FIELD));
+        child3Value.put("lower", child2Value.get("class_id"));
+        child3Value.put("depth", 1L);
+        child3Value.put("type", "");
+        break;
+      case "class_group":
+        child3Value.put("higher", oldValue.get(ID_FIELD));
+        child3Value.put("lower", child2Value.get("class_group_id"));
+        child3Value.put("depth", 1L);
+        break;
+      default:
+        break;
+    }
+    return child3Value;
   }
 
   private Struct buildNewValue(Schema newValueSchema,
