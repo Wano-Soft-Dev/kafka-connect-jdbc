@@ -40,8 +40,10 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 public class JdbcDbWriter {
   private static final Logger log = LoggerFactory.getLogger(JdbcDbWriter.class);
@@ -126,12 +128,21 @@ public class JdbcDbWriter {
             break;
           }
           case "sagyo": {
-            String childFieldInMongo = "sagyo_wokmodel";
-            String childTableInPostgres = "sagyo_wokmodel";
-            String foreignKeyInPostgres = "sagyo_id";
-            handleCustomTopic(record, recordValueSchema, recordValue, schemaName,
-                    catalogName, bufferByTable, connection, childFieldInMongo,
-                    childTableInPostgres, foreignKeyInPostgres, null, null);
+            List<HashMap<String, String>> listFieldInChildRecord = new ArrayList<>();
+
+            listFieldInChildRecord.add(createFieldInChildRecord(
+                    "sagyo_wokmodel",
+                    "sagyo_wokmodel",
+                    "sagyo_id",
+                    null));
+            listFieldInChildRecord.add(createFieldInChildRecord(
+                    "sagyobunrui_m",
+                    "sagyobunrui_sagyo",
+                    "sagyo_id",
+                    null));
+
+            handleCustomTopicForChildRecord(record, recordValueSchema, recordValue, schemaName,
+                    catalogName, bufferByTable, connection, listFieldInChildRecord);
             break;
           }
 
@@ -182,6 +193,18 @@ public class JdbcDbWriter {
     log.info("Completed write operation for {} records to the database", records.size());
   }
 
+  private HashMap<String, String> createFieldInChildRecord(String childFieldInMongo,
+                                                           String childTableInPostgres,
+                                                           String foreignKeyInPostgres,
+                                                           String primaryKeyChildTableInPostgres) {
+    HashMap<String, String> fieldInChildRecord = new HashMap<>();
+    fieldInChildRecord.put("childFieldInMongo", childFieldInMongo);
+    fieldInChildRecord.put("childTableInPostgres", childTableInPostgres);
+    fieldInChildRecord.put("foreignKeyInPostgres", foreignKeyInPostgres);
+    fieldInChildRecord.put("primaryKeyChildTableInPostgres", primaryKeyChildTableInPostgres);
+    return fieldInChildRecord;
+  }
+
   private void handleDefaultTopic(SinkRecord record,
                                   Schema recordValueSchema,
                                   Struct recordValue,
@@ -211,8 +234,10 @@ public class JdbcDbWriter {
           throws SQLException {
     Field isHaveChildFieldInMongo = recordValueSchema.field(childFieldInMongo);
     if (isHaveChildFieldInMongo != null) {
+      List<String> listChildFieldInMongo = Collections.singletonList(childFieldInMongo);
+
       SinkRecord newRecord = getNewParentRecord(record, recordValueSchema, recordValue,
-              childFieldInMongo, primaryKeyParentTableInPostgres);
+              listChildFieldInMongo, primaryKeyParentTableInPostgres);
 
       addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
 
@@ -222,6 +247,47 @@ public class JdbcDbWriter {
 
       for (SinkRecord childRecord : listChildRecord) {
         addBufferByTable(childRecord, schemaName, catalogName, bufferByTable, connection);
+      }
+    }
+  }
+
+  private void handleCustomTopicForChildRecord(
+          SinkRecord record,
+          Schema recordValueSchema,
+          Struct recordValue,
+          String schemaName,
+          String catalogName,
+          Map<TableId, BufferedRecords> bufferByTable,
+          Connection connection,
+          List<HashMap<String, String>> listFieldInChildRecord)
+          throws SQLException {
+    List<String> listChildFieldInMongo = listFieldInChildRecord.stream()
+            .map(fieldInChildRecord -> fieldInChildRecord.get("childFieldInMongo"))
+            .filter(Objects::nonNull)
+            .distinct()
+            .collect(Collectors.toList());
+
+    SinkRecord newRecord = getNewParentRecord(record, recordValueSchema, recordValue,
+            listChildFieldInMongo, null);
+
+    addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
+
+    for (HashMap<String, String> fieldInChildRecord : listFieldInChildRecord) {
+      String childFieldInMongo = fieldInChildRecord.get("childFieldInMongo");
+      String childTableInPostgres = fieldInChildRecord.get("childTableInPostgres");
+      String foreignKeyInPostgres = fieldInChildRecord.get("foreignKeyInPostgres");
+      String primaryKeyChildTableInPostgres = fieldInChildRecord.get(
+              "primaryKeyChildTableInPostgres");
+
+      Field isHaveChildFieldInMongo = recordValueSchema.field(childFieldInMongo);
+      if (isHaveChildFieldInMongo != null) {
+        List<SinkRecord> listChildRecord = getNewChildRecord(record, recordValueSchema,
+                recordValue, childFieldInMongo, childTableInPostgres,
+                foreignKeyInPostgres, primaryKeyChildTableInPostgres);
+
+        for (SinkRecord childRecord : listChildRecord) {
+          addBufferByTable(childRecord, schemaName, catalogName, bufferByTable, connection);
+        }
       }
     }
   }
@@ -271,10 +337,11 @@ public class JdbcDbWriter {
   private SinkRecord getNewParentRecord(SinkRecord record,
                                         Schema oldValueSchema,
                                         Struct oldValue,
-                                        String childFieldInMongo,
+                                        List<String> listChildFieldInMongo,
                                         String primaryKeyParentTableInPostgres) {
-    Set<String> excludedFields = new HashSet<>(
-            Arrays.asList(childFieldInMongo, FIELD_NAME_MODIFIED_TS, FIELD_NAME_INSERTED_TS));
+    Set<String> excludedFields = new HashSet<>(listChildFieldInMongo);
+    excludedFields.add(FIELD_NAME_MODIFIED_TS);
+    excludedFields.add(FIELD_NAME_INSERTED_TS);
 
     if ("demands".equals(record.topic())) {
       excludedFields.add(ID_FIELD);
