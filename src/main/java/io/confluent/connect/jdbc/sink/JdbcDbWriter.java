@@ -22,6 +22,7 @@ import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.slf4j.Logger;
@@ -31,8 +32,10 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -99,7 +102,7 @@ public class JdbcDbWriter {
             String foreignKeyInPostgres = "syain_id";
             handleCustomTopic(record, recordValueSchema, recordValue, schemaName,
                     catalogName, bufferByTable, connection, childFieldInMongo,
-                    childTableInPostgres, foreignKeyInPostgres, null);
+                    childTableInPostgres, foreignKeyInPostgres, null, null);
             break;
           }
           case "shift": {
@@ -108,15 +111,18 @@ public class JdbcDbWriter {
             String primaryKeyChildTableInPostgres = "task_id";
             handleCustomTopic(record, recordValueSchema, recordValue, schemaName,
                     catalogName, bufferByTable, connection, childFieldInMongo,
-                    childTableInPostgres, null, primaryKeyChildTableInPostgres);
+                    childTableInPostgres, null, null, primaryKeyChildTableInPostgres);
             break;
           }
           case "demands": {
             String childFieldInMongo = "workschedules";
             String childTableInPostgres = "workschedule";
+            String primaryKeyParentTableInPostgres = "demand_id";
+            String primaryKeyChildTableInPostgres = "workschedule_id";
             handleCustomTopic(record, recordValueSchema, recordValue, schemaName,
                     catalogName, bufferByTable, connection, childFieldInMongo,
-                    childTableInPostgres, null, null);
+                    childTableInPostgres, null, primaryKeyParentTableInPostgres,
+                    primaryKeyChildTableInPostgres);
             break;
           }
           case "sagyo": {
@@ -125,7 +131,7 @@ public class JdbcDbWriter {
             String foreignKeyInPostgres = "sagyo_id";
             handleCustomTopic(record, recordValueSchema, recordValue, schemaName,
                     catalogName, bufferByTable, connection, childFieldInMongo,
-                    childTableInPostgres, foreignKeyInPostgres, null);
+                    childTableInPostgres, foreignKeyInPostgres, null, null);
             break;
           }
           default: {
@@ -167,7 +173,8 @@ public class JdbcDbWriter {
                                   Map<TableId, BufferedRecords> bufferByTable,
                                   Connection connection)
           throws SQLException {
-    SinkRecord newRecord = getNewDefaultRecord(record, recordValueSchema, recordValue);
+    SinkRecord newRecord = getNewDefaultRecord(record, recordValueSchema,
+            recordValue);
     addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
   }
 
@@ -182,12 +189,13 @@ public class JdbcDbWriter {
                                  String childFieldInMongo,
                                  String childTableInPostgres,
                                  String foreignKeyInPostgres,
+                                 String primaryKeyParentTableInPostgres,
                                  String primaryKeyChildTableInPostgres)
           throws SQLException {
     Field isHaveChildFieldInMongo = recordValueSchema.field(childFieldInMongo);
     if (isHaveChildFieldInMongo != null) {
       SinkRecord newRecord = getNewParentRecord(record, recordValueSchema, recordValue,
-              childFieldInMongo);
+              childFieldInMongo, primaryKeyParentTableInPostgres);
 
       addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
 
@@ -221,10 +229,17 @@ public class JdbcDbWriter {
     if (buffer == null) {
       JdbcSinkConfig tableConfig;
 
-      if (tableId.tableName().equals("task")) {
-        Map<String, String> configMap = new HashMap<>(config.originalsStrings());
+      Map<String, String> configMap = new HashMap<>(config.originalsStrings());
+      Map<String, String> pkFieldsMap = new HashMap<>();
+      pkFieldsMap.put("task", "task_id");
+      pkFieldsMap.put("demands", "demand_id");
+      pkFieldsMap.put("workschedule", "workschedule_id");
+
+      String tableName = tableId.tableName();
+
+      if (pkFieldsMap.containsKey(tableName)) {
         tableConfig = new JdbcSinkConfig(configMap);
-        tableConfig.pkFields = Collections.singletonList("task_id");
+        tableConfig.pkFields = Collections.singletonList(pkFieldsMap.get(tableName));
       } else {
         tableConfig = config;
       }
@@ -239,9 +254,24 @@ public class JdbcDbWriter {
   private SinkRecord getNewParentRecord(SinkRecord record,
                                         Schema oldValueSchema,
                                         Struct oldValue,
-                                        String childFieldInMongo) {
+                                        String childFieldInMongo,
+                                        String primaryKeyParentTableInPostgres) {
     Set<String> excludedFields = new HashSet<>(
             Arrays.asList(childFieldInMongo, FIELD_NAME_MODIFIED_TS, FIELD_NAME_INSERTED_TS));
+
+    if ("demands".equals(record.topic())) {
+      excludedFields.add(ID_FIELD);
+    }
+
+    // build KeySchema
+    Schema parentKeySchema = buildNewKeySchema(record,
+            primaryKeyParentTableInPostgres);
+
+    // build Key
+    Struct parentKey = buildNewKey(record,
+            oldValue,
+            primaryKeyParentTableInPostgres,
+            parentKeySchema);
 
     // build ValueSchema
     Schema newValueSchema = buildNewValueSchema(oldValueSchema, excludedFields);
@@ -252,8 +282,8 @@ public class JdbcDbWriter {
     return new SinkRecord(
             record.topic(),
             record.kafkaPartition(),
-            record.keySchema(),
-            record.key(),
+            parentKeySchema,
+            parentKey,
             newValueSchema,
             newValue,
             record.kafkaOffset(), record.timestamp(),
@@ -283,7 +313,36 @@ public class JdbcDbWriter {
             record.timestampType(), record.headers());
   }
 
-  @SuppressWarnings({"checkstyle:CyclomaticComplexity", "checkstyle:NPathComplexity"})
+  private Struct buildNewKey(SinkRecord record,
+                             Struct oldValue,
+                             String primaryKeyParentTableInPostgres,
+                             Schema parentKeySchema) {
+    Struct parentKey;
+    if (primaryKeyParentTableInPostgres != null) {
+      parentKey = new Struct(parentKeySchema);
+      parentKey.put(primaryKeyParentTableInPostgres,
+              oldValue.get(parentKeySchema.field(primaryKeyParentTableInPostgres)));
+    } else {
+      parentKey = (Struct) record.key();
+    }
+    return parentKey;
+  }
+
+  private Schema buildNewKeySchema(SinkRecord record,
+                                   String primaryKeyParentTableInPostgres) {
+    Schema parentKeySchema;
+    if (primaryKeyParentTableInPostgres != null) {
+      parentKeySchema = SchemaBuilder.struct()
+              .field(primaryKeyParentTableInPostgres,
+                      new SchemaBuilder(Schema.Type.STRING).build())
+              .build();
+    } else {
+      parentKeySchema = record.keySchema();
+    }
+    return parentKeySchema;
+  }
+
+  @SuppressWarnings({"checkstyle:CyclomaticComplexity", "checkstyle:NPathComplexity", "JavaNCSS"})
   private List<SinkRecord> getNewChildRecord(SinkRecord record,
                                              Schema oldValueSchema,
                                              Struct oldValue,
@@ -303,15 +362,7 @@ public class JdbcDbWriter {
       Struct child2Value = (Struct) child1Value.get(field.name());
 
       // build KeySchema
-      Schema child3KeySchema;
-      if (primaryKeyChildTableInPostgres != null) {
-        child3KeySchema = SchemaBuilder.struct()
-                .field(primaryKeyChildTableInPostgres,
-                        new SchemaBuilder(Schema.Type.STRING).build())
-                .build();
-      } else {
-        child3KeySchema = record.keySchema();
-      }
+      Schema child3KeySchema = buildNewKeySchema(record, primaryKeyChildTableInPostgres);
 
       // build Key
       Struct child3Key = new Struct(child3KeySchema);
@@ -328,9 +379,24 @@ public class JdbcDbWriter {
         if (excludedFields.contains(field.name())) {
           continue;
         }
+        String fieldName = field2.name();
+        switch (fieldName) {
+          case "hiduke":
+            if ("workschedule".equals(childTableInPostgres)) {
+              child3ValueSchemaBuilder.field(fieldName, Timestamp.SCHEMA);
+            } else {
+              child3ValueSchemaBuilder.field(fieldName, field2.schema());
+            }
+            break;
 
-        String fieldName = _ID_FIELD.equals(field2.name()) ? ID_FIELD : field2.name();
-        child3ValueSchemaBuilder.field(fieldName, field2.schema());
+          case _ID_FIELD:
+            child3ValueSchemaBuilder.field(ID_FIELD, field2.schema());
+            break;
+
+          default:
+            child3ValueSchemaBuilder.field(fieldName, field2.schema());
+            break;
+        }
       }
 
       if (foreignKeyInPostgres != null) {
@@ -351,12 +417,29 @@ public class JdbcDbWriter {
         }
 
         String fieldName = field2.name();
-        if (_ID_FIELD.equals(fieldName)) {
-          child3Value.put(ID_FIELD, child2Value.get(field2));
-        } else if (SYNC_ACTOR_FIELD.equals(fieldName)) {
-          child3Value.put(fieldName, SYNC_ACTOR_MONGODB);
-        } else {
-          child3Value.put(fieldName, child2Value.get(field2));
+        switch (fieldName) {
+          case _ID_FIELD:
+            child3Value.put(ID_FIELD, child2Value.get(field2));
+            break;
+          case SYNC_ACTOR_FIELD:
+            child3Value.put(fieldName, SYNC_ACTOR_MONGODB);
+            break;
+          case "hiduke":
+            if ("workschedule".equals(childTableInPostgres)) {
+              int hidukeLong = ((Long) child2Value.get(field2)).intValue();
+              Calendar calendar = Calendar.getInstance();
+              calendar.set(1970, Calendar.JANUARY, 1);
+              calendar.add(Calendar.DATE, hidukeLong);
+              Date resultDate = calendar.getTime();
+
+              child3Value.put(fieldName, resultDate);
+            } else {
+              child3Value.put(fieldName, child2Value.get(field2));
+            }
+            break;
+          default:
+            child3Value.put(fieldName, child2Value.get(field2));
+            break;
         }
       }
       if (foreignKeyInPostgres != null) {
