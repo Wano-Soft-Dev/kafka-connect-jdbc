@@ -133,7 +133,7 @@ public class JdbcDbWriter {
             listFieldInChildRecord.add(createFieldInChildRecord(
                     "sagyo_wokmodel",
                     "sagyo_wokmodel",
-                    "sagyo_id",
+                    null,
                     null));
             listFieldInChildRecord.add(createFieldInChildRecord(
                     "sagyobunrui_m",
@@ -233,14 +233,15 @@ public class JdbcDbWriter {
                                  String primaryKeyChildTableInPostgres)
           throws SQLException {
     Field isHaveChildFieldInMongo = recordValueSchema.field(childFieldInMongo);
+
+    List<String> listChildFieldInMongo = Collections.singletonList(childFieldInMongo);
+
+    SinkRecord newRecord = getNewParentRecord(record, recordValueSchema, recordValue,
+            listChildFieldInMongo, primaryKeyParentTableInPostgres);
+
+    addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
+
     if (isHaveChildFieldInMongo != null) {
-      List<String> listChildFieldInMongo = Collections.singletonList(childFieldInMongo);
-
-      SinkRecord newRecord = getNewParentRecord(record, recordValueSchema, recordValue,
-              listChildFieldInMongo, primaryKeyParentTableInPostgres);
-
-      addBufferByTable(newRecord, schemaName, catalogName, bufferByTable, connection);
-
       List<SinkRecord> listChildRecord = getNewChildRecord(record, recordValueSchema,
               recordValue, childFieldInMongo, childTableInPostgres,
               foreignKeyInPostgres, primaryKeyChildTableInPostgres);
@@ -435,42 +436,169 @@ public class JdbcDbWriter {
                                              String primaryKeyChildTableInPostgres) {
     List<SinkRecord> listChildRecord = new ArrayList<>();
     Struct child1Value = ((Struct) oldValue.get(childFieldInMongo));
-    Set<String> excludedFields = getExcludedFieldsChildRecord(record);
+    Set<String> excludedFields = getExcludedFieldsChildRecord(childTableInPostgres);
 
-    child1Value.schema().schema().fields().forEach(field -> {
-      Schema child2ValueSchema = field.schema();
-      Struct child2Value = (Struct) child1Value.get(field.name());
+    Set<String> validFields = new HashSet<>(Arrays.asList("sagyo_wokmodel", "sagyobunrui_m"));
+    boolean isNotHaveChild3 = validFields.contains(childFieldInMongo);
 
-      // build KeySchema
-      Schema child3KeySchema = buildNewKeySchema(record, primaryKeyChildTableInPostgres);
-
-      // build Key
-      Struct child3Key = buildKeyChildRecord(primaryKeyChildTableInPostgres,
-              child3KeySchema, child2Value, child2ValueSchema);
-
-      // build ValueSchema
-      Schema child3ValueSchema = buildValueSchemaChildRecord(record, oldValueSchema,
-              childTableInPostgres, foreignKeyInPostgres, child2ValueSchema, excludedFields);
-
-      // build Value
-      Struct child3Value = buildValueChildRecord(record, oldValue,
-              childTableInPostgres, foreignKeyInPostgres, child3ValueSchema,
-              child2ValueSchema, excludedFields, child2Value);
-
-      SinkRecord childRecord = new SinkRecord(
-              childTableInPostgres,
-              record.kafkaPartition(),
-              child3KeySchema,
-              child3Key,
-              child3ValueSchema,
-              child3Value,
-              record.kafkaOffset(), record.timestamp(),
-              record.timestampType(), record.headers());
+    if (isNotHaveChild3) {
+      SinkRecord childRecord = getChildRecordNotHaveChild3(record, oldValueSchema,
+              oldValue, childTableInPostgres, foreignKeyInPostgres,
+              primaryKeyChildTableInPostgres, child1Value, excludedFields);
 
       listChildRecord.add(childRecord);
-    });
+    } else {
+      child1Value.schema().schema().fields().forEach(field -> {
+        SinkRecord childRecord = getChildRecordHaveChild3(record, oldValueSchema,
+                oldValue, childTableInPostgres, foreignKeyInPostgres,
+                primaryKeyChildTableInPostgres, field, child1Value, excludedFields);
 
+        listChildRecord.add(childRecord);
+      });
+    }
     return listChildRecord;
+  }
+
+  private SinkRecord getChildRecordHaveChild3(SinkRecord record,
+                                              Schema oldValueSchema,
+                                              Struct oldValue,
+                                              String childTableInPostgres,
+                                              String foreignKeyInPostgres,
+                                              String primaryKeyChildTableInPostgres,
+                                              Field field, Struct child1Value,
+                                              Set<String> excludedFields) {
+    Schema child2ValueSchema = field.schema();
+    Struct child2Value = (Struct) child1Value.get(field.name());
+
+    // build KeySchema
+    Schema child3KeySchema = buildNewKeySchema(record, primaryKeyChildTableInPostgres);
+
+    // build Key
+    Struct child3Key = buildKeyChildRecord(primaryKeyChildTableInPostgres,
+            child3KeySchema, child2Value, child2ValueSchema);
+
+    // build ValueSchema
+    Schema child3ValueSchema = buildValueSchemaChildRecord(oldValueSchema, childTableInPostgres,
+            foreignKeyInPostgres, child2ValueSchema, excludedFields);
+
+    // build Value
+    Struct child3Value = buildValueChildRecord(oldValue, childTableInPostgres,
+            foreignKeyInPostgres, child3ValueSchema, child2ValueSchema,
+            excludedFields, child2Value);
+
+    return new SinkRecord(
+            childTableInPostgres,
+            record.kafkaPartition(),
+            child3KeySchema,
+            child3Key,
+            child3ValueSchema,
+            child3Value,
+            record.kafkaOffset(), record.timestamp(),
+            record.timestampType(), record.headers());
+  }
+
+  private SinkRecord getChildRecordNotHaveChild3(SinkRecord record,
+                                                 Schema oldValueSchema,
+                                                 Struct oldValue,
+                                                 String childTableInPostgres,
+                                                 String foreignKeyInPostgres,
+                                                 String primaryKeyChildTableInPostgres,
+                                                 Struct child1Value,
+                                                 Set<String> excludedFields) {
+    Schema child1ValueSchema = child1Value.schema();
+    // build KeySchema
+    Schema child2KeySchema = buildNewKeySchema(record, primaryKeyChildTableInPostgres);
+
+    // build Key
+    Struct child2Key = buildKeyChild2Record(primaryKeyChildTableInPostgres,
+            child2KeySchema, child1Value);
+
+    // build ValueSchema
+    Schema child2ValueSchema = buildChild2ValueSchemaChildRecord(child1ValueSchema,
+            oldValueSchema, foreignKeyInPostgres, excludedFields);
+
+    // build Value
+    Struct child2Value = buildChild2ValueChildRecord(oldValue, foreignKeyInPostgres,
+            child2ValueSchema, child1ValueSchema, excludedFields, child1Value);
+
+    return new SinkRecord(
+            childTableInPostgres,
+            record.kafkaPartition(),
+            child2KeySchema,
+            child2Key,
+            child2ValueSchema,
+            child2Value,
+            record.kafkaOffset(), record.timestamp(),
+            record.timestampType(), record.headers());
+  }
+
+  private Struct buildChild2ValueChildRecord(Struct oldValue,
+                                             String foreignKeyInPostgres,
+                                             Schema child2ValueSchema,
+                                             Schema child1ValueSchema,
+                                             Set<String> excludedFields,
+                                             Struct child1Value) {
+    Struct child2Value = new Struct(child2ValueSchema);
+    // Bỏ qua Value trong danh sách bỏ qua, thay thế Schema
+    for (Field field1 : child1ValueSchema.fields()) {
+      if (excludedFields.contains(field1.name())) {
+        continue;
+      }
+
+      String fieldName = field1.name();
+      switch (fieldName) {
+        case _ID_FIELD:
+          child2Value.put(ID_FIELD, child1Value.get(field1));
+          break;
+        case SYNC_ACTOR_FIELD:
+          child2Value.put(fieldName, SYNC_ACTOR_MONGODB);
+          break;
+        default:
+          child2Value.put(fieldName, child1Value.get(field1));
+          break;
+      }
+    }
+
+    // Thêm Value chưa có
+    if (foreignKeyInPostgres != null) {
+      child2Value.put(foreignKeyInPostgres, oldValue.get(ID_FIELD));
+    }
+    if (child1ValueSchema.field(SYNC_ACTOR_FIELD) == null) {
+      child2Value.put(SYNC_ACTOR_FIELD, SYNC_ACTOR_MONGODB);
+    }
+    return child2Value;
+  }
+
+  private Schema buildChild2ValueSchemaChildRecord(Schema child1ValueSchema,
+                                                   Schema oldValueSchema,
+                                                   String foreignKeyInPostgres,
+                                                   Set<String> excludedFields) {
+    SchemaBuilder child2ValueSchemaBuilder = SchemaBuilder.struct();
+    // Bỏ qua Schema trong danh sách bỏ qua, thay thế Schema
+    for (Field field1 : child1ValueSchema.fields()) {
+      if (excludedFields.contains(field1.name())) {
+        continue;
+      }
+
+      String fieldName = field1.name();
+      if (fieldName.equals(_ID_FIELD)) {
+        child2ValueSchemaBuilder.field(ID_FIELD, field1.schema());
+      } else {
+        child2ValueSchemaBuilder.field(fieldName, field1.schema());
+      }
+    }
+
+    // Thêm Schema chưa có
+    if (foreignKeyInPostgres != null) {
+      child2ValueSchemaBuilder.field(foreignKeyInPostgres,
+              oldValueSchema.field(ID_FIELD).schema());
+    }
+    if (child1ValueSchema.field(SYNC_ACTOR_FIELD) == null) {
+      child2ValueSchemaBuilder.field(
+              SYNC_ACTOR_FIELD, new SchemaBuilder(Schema.Type.STRING).build());
+    }
+
+    return child2ValueSchemaBuilder.build();
   }
 
   private Struct buildKeyChildRecord(String primaryKeyChildTableInPostgres,
@@ -487,15 +615,28 @@ public class JdbcDbWriter {
     return child3Key;
   }
 
-  private Set<String> getExcludedFieldsChildRecord(SinkRecord record) {
+  private Struct buildKeyChild2Record(String primaryKeyChildTableInPostgres,
+                                      Schema child2KeySchema,
+                                      Struct child1Value) {
+    Struct child2Key = new Struct(child2KeySchema);
+    if (primaryKeyChildTableInPostgres != null) {
+      child2Key.put(primaryKeyChildTableInPostgres,
+              new SchemaBuilder(Schema.Type.STRING).build());
+    } else {
+      child2Key.put(ID_FIELD, child1Value.get(_ID_FIELD));
+    }
+    return child2Key;
+  }
+
+  private Set<String> getExcludedFieldsChildRecord(String childTableInPostgres) {
     Set<String> excludedFields = new HashSet<>(
             Arrays.asList(FIELD_NAME_MODIFIED_TS, FIELD_NAME_INSERTED_TS));
 
-    switch (record.topic()) {
-      case "class":
+    switch (childTableInPostgres) {
+      case "class_tree":
         excludedFields.add("class_id");
         break;
-      case "class_group":
+      case "classgroup_rel":
         excludedFields.add("class_group_id");
         break;
       default:
@@ -504,8 +645,8 @@ public class JdbcDbWriter {
     return excludedFields;
   }
 
-  private Schema buildValueSchemaChildRecord(SinkRecord record,
-                                             Schema oldValueSchema,
+  @SuppressWarnings({"checkstyle:CyclomaticComplexity", "checkstyle:JavaNCSS"})
+  private Schema buildValueSchemaChildRecord(Schema oldValueSchema,
                                              String childTableInPostgres,
                                              String foreignKeyInPostgres,
                                              Schema child2ValueSchema,
@@ -546,14 +687,14 @@ public class JdbcDbWriter {
       child3ValueSchemaBuilder.field(
               SYNC_ACTOR_FIELD, new SchemaBuilder(Schema.Type.STRING).build());
     }
-    switch (record.topic()) {
-      case "class":
+    switch (childTableInPostgres) {
+      case "class_tree":
         child3ValueSchemaBuilder.field("higher", oldValueSchema.field(ID_FIELD).schema());
         child3ValueSchemaBuilder.field("lower", child2ValueSchema.field("class_id").schema());
         child3ValueSchemaBuilder.field("depth", SchemaBuilder.type(Schema.Type.INT64).build());
         child3ValueSchemaBuilder.field("type", SchemaBuilder.type(Schema.Type.STRING).build());
         break;
-      case "class_group":
+      case "classgroup_rel":
         child3ValueSchemaBuilder.field("higher", oldValueSchema.field(ID_FIELD).schema());
         child3ValueSchemaBuilder.field("lower", child2ValueSchema.field("class_group_id").schema());
         child3ValueSchemaBuilder.field("depth", SchemaBuilder.type(Schema.Type.INT64).build());
@@ -565,9 +706,8 @@ public class JdbcDbWriter {
     return child3ValueSchemaBuilder.build();
   }
 
-  @SuppressWarnings("checkstyle:CyclomaticComplexity")
-  private Struct buildValueChildRecord(SinkRecord record,
-                                       Struct oldValue,
+  @SuppressWarnings({"checkstyle:CyclomaticComplexity", "checkstyle:JavaNCSS"})
+  private Struct buildValueChildRecord(Struct oldValue,
                                        String childTableInPostgres,
                                        String foreignKeyInPostgres,
                                        Schema child3ValueSchema,
@@ -615,14 +755,14 @@ public class JdbcDbWriter {
     if (child2ValueSchema.field(SYNC_ACTOR_FIELD) == null) {
       child3Value.put(SYNC_ACTOR_FIELD, SYNC_ACTOR_MONGODB);
     }
-    switch (record.topic()) {
-      case "class":
+    switch (childTableInPostgres) {
+      case "class_tree":
         child3Value.put("higher", oldValue.get(ID_FIELD));
         child3Value.put("lower", child2Value.get("class_id"));
         child3Value.put("depth", 1L);
         child3Value.put("type", "");
         break;
-      case "class_group":
+      case "classgroup_rel":
         child3Value.put("higher", oldValue.get(ID_FIELD));
         child3Value.put("lower", child2Value.get("class_group_id"));
         child3Value.put("depth", 1L);
