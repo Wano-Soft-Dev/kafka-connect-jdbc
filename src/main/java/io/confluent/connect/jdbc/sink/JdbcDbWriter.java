@@ -22,7 +22,6 @@ import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.slf4j.Logger;
@@ -32,10 +31,8 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Calendar;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -681,22 +678,10 @@ public class JdbcDbWriter {
         continue;
       }
       String fieldName = field2.name();
-      switch (fieldName) {
-        case "hiduke":
-          if ("workschedule".equals(childTableInPostgres)) {
-            child3ValueSchemaBuilder.field(fieldName, Timestamp.SCHEMA);
-          } else {
-            child3ValueSchemaBuilder.field(fieldName, field2.schema());
-          }
-          break;
-
-        case _ID_FIELD:
-          child3ValueSchemaBuilder.field(ID_FIELD, field2.schema());
-          break;
-
-        default:
-          child3ValueSchemaBuilder.field(fieldName, field2.schema());
-          break;
+      if (fieldName.equals(_ID_FIELD)) {
+        child3ValueSchemaBuilder.field(ID_FIELD, field2.schema());
+      } else {
+        child3ValueSchemaBuilder.field(fieldName, field2.schema());
       }
     }
 
@@ -755,19 +740,6 @@ public class JdbcDbWriter {
           break;
         case SYNC_ACTOR_FIELD:
           child3Value.put(fieldName, SYNC_ACTOR_MONGODB);
-          break;
-        case "hiduke":
-          if ("workschedule".equals(childTableInPostgres)) {
-            int hidukeLong = ((Long) child2Value.get(field2)).intValue();
-            Calendar calendar = Calendar.getInstance();
-            calendar.set(1970, Calendar.JANUARY, 1);
-            calendar.add(Calendar.DATE, hidukeLong);
-            Date resultDate = calendar.getTime();
-
-            child3Value.put(fieldName, resultDate);
-          } else {
-            child3Value.put(fieldName, child2Value.get(field2));
-          }
           break;
         default:
           child3Value.put(fieldName, child2Value.get(field2));
