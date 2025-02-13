@@ -146,6 +146,25 @@ public class JdbcDbWriter {
             break;
           }
 
+          case "tenpo_group": {
+            List<HashMap<String, String>> listFieldInChildRecord = new ArrayList<>();
+
+            listFieldInChildRecord.add(createFieldInChildRecord(
+                    "lower_tenpo_groups",
+                    "tenpogroup_rel",
+                    null,
+                    null));
+            listFieldInChildRecord.add(createFieldInChildRecord(
+                    "tenporoup_class_rel",
+                    "tenpogroup_class_rel",
+                    "tenpogroup_id",
+                    null));
+
+            handleCustomTopicForChildRecord(record, recordValueSchema, recordValue, schemaName,
+                    catalogName, bufferByTable, connection, listFieldInChildRecord);
+            break;
+          }
+
           case "class": {
             String childFieldInMongo = "lower_classes";
             String childTableInPostgres = "class_tree";
@@ -639,6 +658,9 @@ public class JdbcDbWriter {
       case "classgroup_rel":
         excludedFields.add("class_group_id");
         break;
+      case "tenpogroup_rel":
+        excludedFields.add("tenpo_group_id");
+        break;
       default:
         break;
     }
@@ -697,6 +719,11 @@ public class JdbcDbWriter {
       case "classgroup_rel":
         child3ValueSchemaBuilder.field("higher", oldValueSchema.field(ID_FIELD).schema());
         child3ValueSchemaBuilder.field("lower", child2ValueSchema.field("class_group_id").schema());
+        child3ValueSchemaBuilder.field("depth", SchemaBuilder.type(Schema.Type.INT64).build());
+        break;
+      case "tenpogroup_rel":
+        child3ValueSchemaBuilder.field("higher", oldValueSchema.field(ID_FIELD).schema());
+        child3ValueSchemaBuilder.field("lower", child2ValueSchema.field("tenpo_group_id").schema());
         child3ValueSchemaBuilder.field("depth", SchemaBuilder.type(Schema.Type.INT64).build());
         break;
       default:
@@ -765,6 +792,11 @@ public class JdbcDbWriter {
       case "classgroup_rel":
         child3Value.put("higher", oldValue.get(ID_FIELD));
         child3Value.put("lower", child2Value.get("class_group_id"));
+        child3Value.put("depth", 1L);
+        break;
+      case "tenpogroup_rel":
+        child3Value.put("higher", oldValue.get(ID_FIELD));
+        child3Value.put("lower", child2Value.get("tenpo_group_id"));
         child3Value.put("depth", 1L);
         break;
       default:
