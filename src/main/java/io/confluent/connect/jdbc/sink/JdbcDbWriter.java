@@ -152,7 +152,7 @@ public class JdbcDbWriter {
                     null,
                     null));
             listFieldInChildRecord.add(createFieldInChildRecord(
-                    "tenporoup_class_rel",
+                    "tenpogroup_class_rel",
                     "tenpogroup_class_rel",
                     "tenpogroup_id",
                     null));
